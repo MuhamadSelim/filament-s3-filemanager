@@ -63,19 +63,33 @@
              // View state
              viewMode: 'grid',
 
-             // Upload state
-             uploading: false,
-             uploadProgress: 0,
-             uploadError: null,
-             uploadFile: null,
+            // Upload state
+            uploading: false,
+            uploadProgress: 0,
+            uploadError: null,
+            uploadFile: null,
 
-             // Component state
-             statePath: @js($statePath),
-             componentId: @js($componentId),
-             disk: @js($disk),
-             error: null,
-             errorMessage: '',
-             loading: false,
+            // File operations state
+            directoriesInCurrentFolder: [],
+            operationInProgress: false,
+            operationError: null,
+            renameItem: null,
+            renameNewName: '',
+            moveItem: null,
+            moveDestination: '',
+            copyItem: null,
+            copyDestination: '',
+            deleteItem: null,
+            deleteType: null,
+            newFolderName: '',
+
+            // Component state
+            statePath: @js($statePath),
+            componentId: @js($componentId),
+            disk: @js($disk),
+            error: null,
+            errorMessage: '',
+            loading: false,
 
              // Computed
              get filteredFolders() {
@@ -91,12 +105,25 @@
                  return [];
              },
 
-             get displayFiles() {
-                 if (this.isSearching && this.searchQuery) {
-                     return this.searchResults;
-                 }
-                 return this.filesInCurrentFolder;
-             },
+            get displayFiles() {
+                if (this.isSearching && this.searchQuery) {
+                    return this.searchResults;
+                }
+                return this.filesInCurrentFolder;
+            },
+
+            get displayItems() {
+                // Combine directories and files for display
+                const dirs = (this.directoriesInCurrentFolder || []).map(dir => ({
+                    ...dir,
+                    isDirectory: true
+                }));
+                const files = (this.displayFiles || []).map(file => ({
+                    ...file,
+                    isDirectory: false
+                }));
+                return [...dirs, ...files];
+            },
 
              get hasSelection() {
                  return this.selectedFile !== null || this.selectedFolder !== null;
@@ -108,12 +135,19 @@
                  return null;
              },
 
-             // Methods
-             init() {
-                 this.loadFolderContents('');
-                 this.buildBreadcrumbs();
-                 window['fileBrowser_{{ $safeComponentId }}'] = this;
-             },
+            // Helper functions
+            basename(path) {
+                if (!path) return '';
+                const parts = path.split('/');
+                return parts[parts.length - 1];
+            },
+
+            // Methods
+            init() {
+                this.loadFolderContents('');
+                this.buildBreadcrumbs();
+                window['fileBrowser_{{ $safeComponentId }}'] = this;
+            },
 
              navigateToFolder(path) {
                  this.currentFolder = path;
@@ -177,28 +211,30 @@
                          throw new Error(data.message || `Server error: ${response.status}`);
                      }
 
-                     const data = await response.json();
+                    const data = await response.json();
 
-                     if (data.success) {
-                         if (append) {
-                             this.filesInCurrentFolder = [...this.filesInCurrentFolder, ...data.files];
-                         } else {
-                             this.filesInCurrentFolder = data.files;
-                         }
+                    if (data.success) {
+                        if (append) {
+                            this.filesInCurrentFolder = [...this.filesInCurrentFolder, ...(data.files || [])];
+                            this.directoriesInCurrentFolder = [...this.directoriesInCurrentFolder, ...(data.directories || [])];
+                        } else {
+                            this.filesInCurrentFolder = data.files || [];
+                            this.directoriesInCurrentFolder = data.directories || [];
+                        }
 
-                         if (data.pagination) {
-                             this.currentPage = data.pagination.current_page;
-                             this.totalFiles = data.pagination.total;
-                             this.lastPage = data.pagination.last_page;
-                             this.hasMore = data.pagination.has_more;
-                         }
+                        if (data.pagination) {
+                            this.currentPage = data.pagination.current_page;
+                            this.totalFiles = data.pagination.total;
+                            this.lastPage = data.pagination.last_page;
+                            this.hasMore = data.pagination.has_more;
+                        }
 
-                         this.loadedFolders[path] = true;
-                         this.error = null;
-                         this.errorMessage = '';
-                     } else {
-                         throw new Error(data.message || 'Failed to load folder contents');
-                     }
+                        this.loadedFolders[path] = true;
+                        this.error = null;
+                        this.errorMessage = '';
+                    } else {
+                        throw new Error(data.message || 'Failed to load folder contents');
+                    }
                  } catch (error) {
                      console.error('Error loading folder contents:', error);
                      this.error = true;
@@ -485,13 +521,281 @@
                      xhr.open('POST', @js(route('filament-s3-filemanager.upload')));
                      xhr.setRequestHeader('X-CSRF-TOKEN', @js(csrf_token()));
                      xhr.send(formData);
-                 } catch (error) {
-                     console.error('Upload error:', error);
-                     this.uploadError = error.message || 'An unexpected error occurred';
-                     this.uploading = false;
-                 }
-             }
-         }"
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    this.uploadError = error.message || 'An unexpected error occurred';
+                    this.uploading = false;
+                }
+            },
+
+            async deleteItem(item, type) {
+                if (!confirm(`Are you sure you want to delete this ${type}? This action cannot be undone.`)) {
+                    return;
+                }
+
+                this.operationInProgress = true;
+                this.operationError = null;
+
+                try {
+                    const route = type === 'file' 
+                        ? @js(route('filament-s3-filemanager.delete-file'))
+                        : @js(route('filament-s3-filemanager.delete-folder'));
+
+                    const response = await fetch(route, {
+                        method: 'DELETE',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': @js(csrf_token()),
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            [type === 'file' ? 'file_path' : 'folder_path']: item.path || item,
+                            disk: this.disk
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        this.loadFolderContents(this.currentFolder);
+                        alert(`${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully!`);
+                    } else {
+                        this.operationError = data.message || 'Failed to delete';
+                    }
+                } catch (error) {
+                    console.error('Delete error:', error);
+                    this.operationError = error.message || 'An unexpected error occurred';
+                } finally {
+                    this.operationInProgress = false;
+                }
+            },
+
+            openRenameModal(item, type) {
+                this.renameItem = item;
+                this.renameNewName = item.name || this.basename(item.path || item);
+                this.operationError = null;
+                $dispatch('open-modal', { id: this.componentId + '-rename-modal' });
+            },
+
+            async performRename() {
+                if (!this.renameItem || !this.renameNewName.trim()) {
+                    this.operationError = 'Please enter a name';
+                    return;
+                }
+
+                this.operationInProgress = true;
+                this.operationError = null;
+
+                try {
+                    const route = this.renameItem.isDirectory
+                        ? @js(route('filament-s3-filemanager.rename-folder'))
+                        : @js(route('filament-s3-filemanager.rename-file'));
+
+                    const response = await fetch(route, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': @js(csrf_token()),
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            [this.renameItem.isDirectory ? 'folder_path' : 'file_path']: this.renameItem.path,
+                            new_name: this.renameNewName.trim(),
+                            disk: this.disk
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        this.loadFolderContents(this.currentFolder);
+                        $dispatch('close-modal', { id: this.componentId + '-rename-modal' });
+                        this.renameItem = null;
+                        this.renameNewName = '';
+                        alert('Renamed successfully!');
+                    } else {
+                        this.operationError = data.message || 'Failed to rename';
+                    }
+                } catch (error) {
+                    console.error('Rename error:', error);
+                    this.operationError = error.message || 'An unexpected error occurred';
+                } finally {
+                    this.operationInProgress = false;
+                }
+            },
+
+            openMoveModal(item) {
+                this.moveItem = item;
+                this.moveDestination = this.currentFolder || '';
+                this.operationError = null;
+                $dispatch('open-modal', { id: this.componentId + '-move-modal' });
+            },
+
+            async performMove() {
+                if (!this.moveItem || !this.moveDestination.trim()) {
+                    this.operationError = 'Please enter a destination path';
+                    return;
+                }
+
+                this.operationInProgress = true;
+                this.operationError = null;
+
+                try {
+                    const route = this.moveItem.isDirectory
+                        ? @js(route('filament-s3-filemanager.move-folder'))
+                        : @js(route('filament-s3-filemanager.move-file'));
+
+                    const destPath = this.moveDestination.trim() 
+                        ? `${this.moveDestination.trim()}/${this.moveItem.name || this.basename(this.moveItem.path)}`
+                        : (this.moveItem.name || this.basename(this.moveItem.path));
+
+                    const response = await fetch(route, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': @js(csrf_token()),
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            source_path: this.moveItem.path,
+                            destination_path: destPath,
+                            disk: this.disk
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        this.loadFolderContents(this.currentFolder);
+                        $dispatch('close-modal', { id: this.componentId + '-move-modal' });
+                        this.moveItem = null;
+                        this.moveDestination = '';
+                        alert('Moved successfully!');
+                    } else {
+                        this.operationError = data.message || 'Failed to move';
+                    }
+                } catch (error) {
+                    console.error('Move error:', error);
+                    this.operationError = error.message || 'An unexpected error occurred';
+                } finally {
+                    this.operationInProgress = false;
+                }
+            },
+
+            openCopyModal(item) {
+                this.copyItem = item;
+                this.copyDestination = this.currentFolder || '';
+                this.operationError = null;
+                $dispatch('open-modal', { id: this.componentId + '-copy-modal' });
+            },
+
+            async performCopy() {
+                if (!this.copyItem || !this.copyDestination.trim()) {
+                    this.operationError = 'Please enter a destination path';
+                    return;
+                }
+
+                this.operationInProgress = true;
+                this.operationError = null;
+
+                try {
+                    const route = this.copyItem.isDirectory
+                        ? @js(route('filament-s3-filemanager.copy-folder'))
+                        : @js(route('filament-s3-filemanager.copy-file'));
+
+                    const destPath = this.copyDestination.trim() 
+                        ? `${this.copyDestination.trim()}/${this.copyItem.name || this.basename(this.copyItem.path)}`
+                        : (this.copyItem.name || this.basename(this.copyItem.path));
+
+                    const response = await fetch(route, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': @js(csrf_token()),
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            source_path: this.copyItem.path,
+                            destination_path: destPath,
+                            disk: this.disk
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        this.loadFolderContents(this.currentFolder);
+                        $dispatch('close-modal', { id: this.componentId + '-copy-modal' });
+                        this.copyItem = null;
+                        this.copyDestination = '';
+                        alert('Copied successfully!');
+                    } else {
+                        this.operationError = data.message || 'Failed to copy';
+                    }
+                } catch (error) {
+                    console.error('Copy error:', error);
+                    this.operationError = error.message || 'An unexpected error occurred';
+                } finally {
+                    this.operationInProgress = false;
+                }
+            },
+
+            openCreateFolderModal() {
+                this.newFolderName = '';
+                this.operationError = null;
+                $dispatch('open-modal', { id: this.componentId + '-create-folder-modal' });
+            },
+
+            async performCreateFolder() {
+                if (!this.newFolderName.trim()) {
+                    this.operationError = 'Please enter a folder name';
+                    return;
+                }
+
+                this.operationInProgress = true;
+                this.operationError = null;
+
+                try {
+                    const folderPath = this.currentFolder 
+                        ? `${this.currentFolder}/${this.newFolderName.trim()}`
+                        : this.newFolderName.trim();
+
+                    const response = await fetch(@js(route('filament-s3-filemanager.create-folder')), {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-TOKEN': @js(csrf_token()),
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            folder_path: folderPath,
+                            disk: this.disk
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (data.success) {
+                        this.loadFolderContents(this.currentFolder);
+                        $dispatch('close-modal', { id: this.componentId + '-create-folder-modal' });
+                        this.newFolderName = '';
+                        alert('Folder created successfully!');
+                    } else {
+                        this.operationError = data.message || 'Failed to create folder';
+                    }
+                } catch (error) {
+                    console.error('Create folder error:', error);
+                    this.operationError = error.message || 'An unexpected error occurred';
+                } finally {
+                    this.operationInProgress = false;
+                }
+            }
+        }"
          x-init="init()"
          data-file-browser-id="{{ $componentId }}">
 
@@ -589,6 +893,16 @@
                         </svg>
                         Upload File
                     </button>
+                    <button
+                        type="button"
+                        @click="openCreateFolderModal()"
+                        class="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
+                    >
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                        </svg>
+                        Create Folder
+                    </button>
                 </div>
 
                 <!-- Error Display -->
@@ -671,7 +985,7 @@
 
                     <!-- File List (Right Panel) -->
                     <div :class="isSearching ? 'col-span-12' : 'col-span-9'">
-                        <div x-show="displayFiles.length === 0 && !loading" class="text-center py-12 text-gray-500">
+                        <div x-show="displayItems.length === 0 && !loading" class="text-center py-12 text-gray-500">
                             <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
                             </svg>
@@ -679,29 +993,57 @@
                         </div>
 
                         <!-- Grid View -->
-                        <div x-show="viewMode === 'grid' && displayFiles.length > 0" class="space-y-4">
+                        <div x-show="viewMode === 'grid' && displayItems.length > 0" class="space-y-4">
                             <div class="grid grid-cols-3 gap-4">
-                                <template x-for="file in displayFiles" :key="file.path">
+                                <template x-for="item in displayItems" :key="item.path">
                                     <div
-                                        @click="canSelectFiles ? selectFile(file.path) : null"
-                                        class="border rounded-lg p-4 cursor-pointer hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition"
+                                        @click="item.isDirectory ? (canSelectFolders ? selectFolder(item.path) : navigateToFolder(item.path)) : (canSelectFiles ? selectFile(item.path) : null)"
+                                        class="border rounded-lg p-4 cursor-pointer hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition relative group"
                                         :class="{ 
-                                            'border-primary-500 bg-primary-50 dark:bg-primary-900/20': canSelectFiles && selectedFile === file.path,
-                                            'cursor-default': !canSelectFiles
+                                            'border-primary-500 bg-primary-50 dark:bg-primary-900/20': (item.isDirectory && canSelectFolders && selectedFolder === item.path) || (!item.isDirectory && canSelectFiles && selectedFile === item.path),
+                                            'cursor-default': !canSelectFiles && !item.isDirectory
                                         }"
                                     >
                                         <div class="flex flex-col items-center text-center">
-                                            <svg class="w-12 h-12 text-gray-400 mb-2" fill="currentColor" viewBox="0 0 20 20">
+                                            <svg x-show="item.isDirectory" class="w-12 h-12 text-blue-400 mb-2" fill="currentColor" viewBox="0 0 20 20">
+                                                <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+                                            </svg>
+                                            <svg x-show="!item.isDirectory" class="w-12 h-12 text-gray-400 mb-2" fill="currentColor" viewBox="0 0 20 20">
                                                 <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>
                                             </svg>
-                                            <p class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate w-full" x-text="file.name"></p>
-                                            <p class="text-xs text-gray-500 mt-1" x-text="formatFileSize(file.size)"></p>
-                                            <div class="mt-2 flex gap-2">
+                                            <p class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate w-full" x-text="item.name"></p>
+                                            <p x-show="!item.isDirectory" class="text-xs text-gray-500 mt-1" x-text="formatFileSize(item.size || 0)"></p>
+                                            <div class="mt-2 flex gap-2 flex-wrap justify-center">
                                                 <button
-                                                    @click.stop="openPreview(file.path)"
+                                                    x-show="!item.isDirectory"
+                                                    @click.stop="openPreview(item.path)"
                                                     class="text-xs text-primary-600 hover:text-primary-700"
                                                 >
                                                     Preview
+                                                </button>
+                                                <button
+                                                    @click.stop="openRenameModal(item, item.isDirectory ? 'folder' : 'file')"
+                                                    class="text-xs text-blue-600 hover:text-blue-700"
+                                                >
+                                                    Rename
+                                                </button>
+                                                <button
+                                                    @click.stop="openMoveModal(item)"
+                                                    class="text-xs text-yellow-600 hover:text-yellow-700"
+                                                >
+                                                    Move
+                                                </button>
+                                                <button
+                                                    @click.stop="openCopyModal(item)"
+                                                    class="text-xs text-green-600 hover:text-green-700"
+                                                >
+                                                    Copy
+                                                </button>
+                                                <button
+                                                    @click.stop="deleteItem(item, item.isDirectory ? 'folder' : 'file')"
+                                                    class="text-xs text-red-600 hover:text-red-700"
+                                                >
+                                                    Delete
                                                 </button>
                                             </div>
                                         </div>
@@ -725,30 +1067,60 @@
                         </div>
 
                         <!-- List View -->
-                        <div x-show="viewMode === 'list' && displayFiles.length > 0" class="space-y-2">
-                            <template x-for="file in displayFiles" :key="file.path">
+                        <div x-show="viewMode === 'list' && displayItems.length > 0" class="space-y-2">
+                            <template x-for="item in displayItems" :key="item.path">
                                 <div
-                                    @click="canSelectFiles ? selectFile(file.path) : null"
+                                    @click="item.isDirectory ? (canSelectFolders ? selectFolder(item.path) : navigateToFolder(item.path)) : (canSelectFiles ? selectFile(item.path) : null)"
                                     class="flex items-center gap-4 p-3 border rounded-lg transition"
                                     :class="{ 
-                                        'border-primary-500 bg-primary-50 dark:bg-primary-900/20 cursor-pointer hover:border-primary-500': canSelectFiles && selectedFile === file.path,
-                                        'cursor-default': !canSelectFiles
+                                        'border-primary-500 bg-primary-50 dark:bg-primary-900/20 cursor-pointer hover:border-primary-500': (item.isDirectory && canSelectFolders && selectedFolder === item.path) || (!item.isDirectory && canSelectFiles && selectedFile === item.path),
+                                        'cursor-default': !canSelectFiles && !item.isDirectory
                                     }"
                                 >
-                                    <svg class="w-8 h-8 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <svg x-show="item.isDirectory" class="w-8 h-8 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                                        <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+                                    </svg>
+                                    <svg x-show="!item.isDirectory" class="w-8 h-8 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
                                         <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/>
                                     </svg>
                                     <div class="flex-1 min-w-0">
-                                        <p class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate" x-text="file.name"></p>
-                                        <p class="text-xs text-gray-500" x-text="file.path"></p>
+                                        <p class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate" x-text="item.name"></p>
+                                        <p class="text-xs text-gray-500" x-text="item.path"></p>
                                     </div>
-                                    <div class="text-sm text-gray-500" x-text="formatFileSize(file.size)"></div>
-                                    <button
-                                        @click.stop="openPreview(file.path)"
-                                        class="text-sm text-primary-600 hover:text-primary-700"
-                                    >
-                                        Preview
-                                    </button>
+                                    <div x-show="!item.isDirectory" class="text-sm text-gray-500" x-text="formatFileSize(item.size || 0)"></div>
+                                    <div class="flex gap-2">
+                                        <button
+                                            x-show="!item.isDirectory"
+                                            @click.stop="openPreview(item.path)"
+                                            class="text-sm text-primary-600 hover:text-primary-700"
+                                        >
+                                            Preview
+                                        </button>
+                                        <button
+                                            @click.stop="openRenameModal(item, item.isDirectory ? 'folder' : 'file')"
+                                            class="text-sm text-blue-600 hover:text-blue-700"
+                                        >
+                                            Rename
+                                        </button>
+                                        <button
+                                            @click.stop="openMoveModal(item)"
+                                            class="text-sm text-yellow-600 hover:text-yellow-700"
+                                        >
+                                            Move
+                                        </button>
+                                        <button
+                                            @click.stop="openCopyModal(item)"
+                                            class="text-sm text-green-600 hover:text-green-700"
+                                        >
+                                            Copy
+                                        </button>
+                                        <button
+                                            @click.stop="deleteItem(item, item.isDirectory ? 'folder' : 'file')"
+                                            class="text-sm text-red-600 hover:text-red-700"
+                                        >
+                                            Delete
+                                        </button>
+                                    </div>
                                 </div>
                             </template>
 
@@ -950,6 +1322,208 @@
                     color="gray"
                     @click="$dispatch('close-modal', { id: '{{ $getId() }}-upload-modal' })"
                     x-bind:disabled="uploading"
+                >
+                    Cancel
+                </x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <!-- Rename Modal -->
+        <x-filament::modal
+            id="{{ $getId() }}-rename-modal"
+            width="2xl"
+        >
+            <x-slot name="heading">
+                Rename <span x-text="renameItem?.isDirectory ? 'Folder' : 'File'"></span>
+            </x-slot>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        New Name
+                    </label>
+                    <input
+                        type="text"
+                        x-model="renameNewName"
+                        class="w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                        placeholder="Enter new name"
+                    />
+                </div>
+
+                <div x-show="operationError" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                    <p class="text-sm text-red-800 dark:text-red-200" x-text="operationError"></p>
+                </div>
+            </div>
+
+            <x-slot name="footerActions">
+                <x-filament::button
+                    @click="performRename()"
+                    x-bind:disabled="!renameNewName || operationInProgress"
+                >
+                    <span x-show="!operationInProgress">Rename</span>
+                    <span x-show="operationInProgress" class="flex items-center gap-2">
+                        <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        Renaming...
+                    </span>
+                </x-filament::button>
+
+                <x-filament::button
+                    color="gray"
+                    @click="$dispatch('close-modal', { id: '{{ $getId() }}-rename-modal' })"
+                    x-bind:disabled="operationInProgress"
+                >
+                    Cancel
+                </x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <!-- Move Modal -->
+        <x-filament::modal
+            id="{{ $getId() }}-move-modal"
+            width="2xl"
+        >
+            <x-slot name="heading">
+                Move <span x-text="moveItem?.isDirectory ? 'Folder' : 'File'"></span>
+            </x-slot>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Destination Path
+                    </label>
+                    <input
+                        type="text"
+                        x-model="moveDestination"
+                        class="w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                        placeholder="Enter destination folder path (leave empty for root)"
+                    />
+                    <p class="text-xs text-gray-500 mt-1">Current folder: <span x-text="currentFolder || '(root)'"></span></p>
+                </div>
+
+                <div x-show="operationError" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                    <p class="text-sm text-red-800 dark:text-red-200" x-text="operationError"></p>
+                </div>
+            </div>
+
+            <x-slot name="footerActions">
+                <x-filament::button
+                    @click="performMove()"
+                    x-bind:disabled="operationInProgress"
+                >
+                    <span x-show="!operationInProgress">Move</span>
+                    <span x-show="operationInProgress" class="flex items-center gap-2">
+                        <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        Moving...
+                    </span>
+                </x-filament::button>
+
+                <x-filament::button
+                    color="gray"
+                    @click="$dispatch('close-modal', { id: '{{ $getId() }}-move-modal' })"
+                    x-bind:disabled="operationInProgress"
+                >
+                    Cancel
+                </x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <!-- Copy Modal -->
+        <x-filament::modal
+            id="{{ $getId() }}-copy-modal"
+            width="2xl"
+        >
+            <x-slot name="heading">
+                Copy <span x-text="copyItem?.isDirectory ? 'Folder' : 'File'"></span>
+            </x-slot>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Destination Path
+                    </label>
+                    <input
+                        type="text"
+                        x-model="copyDestination"
+                        class="w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                        placeholder="Enter destination folder path (leave empty for root)"
+                    />
+                    <p class="text-xs text-gray-500 mt-1">Current folder: <span x-text="currentFolder || '(root)'"></span></p>
+                </div>
+
+                <div x-show="operationError" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                    <p class="text-sm text-red-800 dark:text-red-200" x-text="operationError"></p>
+                </div>
+            </div>
+
+            <x-slot name="footerActions">
+                <x-filament::button
+                    @click="performCopy()"
+                    x-bind:disabled="operationInProgress"
+                >
+                    <span x-show="!operationInProgress">Copy</span>
+                    <span x-show="operationInProgress" class="flex items-center gap-2">
+                        <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        Copying...
+                    </span>
+                </x-filament::button>
+
+                <x-filament::button
+                    color="gray"
+                    @click="$dispatch('close-modal', { id: '{{ $getId() }}-copy-modal' })"
+                    x-bind:disabled="operationInProgress"
+                >
+                    Cancel
+                </x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <!-- Create Folder Modal -->
+        <x-filament::modal
+            id="{{ $getId() }}-create-folder-modal"
+            width="2xl"
+        >
+            <x-slot name="heading">
+                Create New Folder
+            </x-slot>
+
+            <x-slot name="description">
+                Create a folder in: <span x-text="currentFolder || '(root)'" class="font-medium"></span>
+            </x-slot>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Folder Name
+                    </label>
+                    <input
+                        type="text"
+                        x-model="newFolderName"
+                        class="w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                        placeholder="Enter folder name"
+                    />
+                </div>
+
+                <div x-show="operationError" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                    <p class="text-sm text-red-800 dark:text-red-200" x-text="operationError"></p>
+                </div>
+            </div>
+
+            <x-slot name="footerActions">
+                <x-filament::button
+                    @click="performCreateFolder()"
+                    x-bind:disabled="!newFolderName || operationInProgress"
+                >
+                    <span x-show="!operationInProgress">Create</span>
+                    <span x-show="operationInProgress" class="flex items-center gap-2">
+                        <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        Creating...
+                    </span>
+                </x-filament::button>
+
+                <x-filament::button
+                    color="gray"
+                    @click="$dispatch('close-modal', { id: '{{ $getId() }}-create-folder-modal' })"
+                    x-bind:disabled="operationInProgress"
                 >
                     Cancel
                 </x-filament::button>

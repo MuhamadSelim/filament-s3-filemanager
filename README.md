@@ -13,6 +13,10 @@ A Filament v3 plugin for S3-compatible file management with file and folder sele
 - 🔒 **Secure**: Presigned URLs for secure file access
 - ⚡ **Caching**: Built-in caching for improved performance
 - 🎯 **Flysystem Integration**: Works with any S3-compatible storage (AWS S3, DigitalOcean Spaces, etc.)
+- ✏️ **File Operations**: Rename, move, copy, and delete files and folders
+- 📂 **Folder Management**: Create new folders directly from the file browser
+- 🗑️ **Bulk Operations**: Delete files and folders with confirmation
+- 🔄 **Real-time Updates**: Automatic refresh after file operations
 
 ## Installation
 
@@ -154,9 +158,18 @@ The component supports three selection modes:
 
 The package registers the following API routes:
 
-- `POST /api/s3-files/folder-contents` - List files in a folder with pagination
+- `POST /api/s3-files/folder-contents` - List files and directories in a folder with pagination
 - `POST /api/s3-files/preview-url` - Generate presigned URL for file preview
 - `POST /api/s3-files/upload` - Upload file to S3
+- `DELETE /api/s3-files/file` - Delete a file
+- `DELETE /api/s3-files/folder` - Delete a folder and all its contents
+- `POST /api/s3-files/rename-file` - Rename a file
+- `POST /api/s3-files/rename-folder` - Rename a folder
+- `POST /api/s3-files/move-file` - Move a file to a new location
+- `POST /api/s3-files/move-folder` - Move a folder to a new location
+- `POST /api/s3-files/copy-file` - Copy a file to a new location
+- `POST /api/s3-files/copy-folder` - Copy a folder to a new location
+- `POST /api/s3-files/create-folder` - Create a new folder
 
 All routes are protected by authentication middleware and rate limiting.
 
@@ -202,6 +215,49 @@ Configure which file extensions are allowed:
 'allowed_extensions' => [
     'mp4', 'pdf', 'jpg', 'png', // etc.
 ],
+```
+
+## File Operations
+
+The file browser includes comprehensive file management capabilities:
+
+### Delete Operations
+- Delete individual files
+- Delete folders and all their contents
+- Confirmation dialogs for safety
+
+### Rename Operations
+- Rename files and folders
+- Validation to prevent duplicate names
+- Real-time updates after renaming
+
+### Move Operations
+- Move files to different folders
+- Move folders with all contents
+- Path validation and error handling
+
+### Copy Operations
+- Copy files to new locations
+- Copy folders recursively
+- Maintains original files
+
+### Create Folder
+- Create new folders from the file browser
+- Automatic navigation to new folder
+- Validation for folder names
+
+## Testing
+
+Run the test suite:
+
+```bash
+composer test
+```
+
+Or with PHPUnit directly:
+
+```bash
+vendor/bin/phpunit
 ```
 
 ## Requirements

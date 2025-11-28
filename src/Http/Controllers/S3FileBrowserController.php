@@ -65,6 +65,7 @@ class S3FileBrowserController extends Controller
             return response()->json([
                 'success' => true,
                 'files' => $result['files'],
+                'directories' => $result['directories'] ?? [],
                 'pagination' => $result['pagination'],
             ]);
         } catch (\RuntimeException $e) {
@@ -284,6 +285,734 @@ class S3FileBrowserController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'An unexpected error occurred while uploading the file. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete a file from S3.
+     */
+    public function deleteFile(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'file_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate file path for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['file_path'])) {
+            \Log::warning('Malicious file path detected', [
+                'original_path' => $validated['file_path'],
+                'user_id' => auth()->id(),
+                'ip' => $request->ip(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid file path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize file path
+        $filePath = $this->sanitizeFilePath($validated['file_path']);
+
+        try {
+            $result = $this->storageService->deleteFile($filePath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'File deleted successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to delete file.',
+                'error_type' => 'delete_failed',
+            ], 500);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error deleting file', [
+                'file_path' => $filePath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while deleting the file. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete a folder from S3.
+     */
+    public function deleteFolder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'folder_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate folder path for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['folder_path'])) {
+            \Log::warning('Malicious folder path detected', [
+                'original_path' => $validated['folder_path'],
+                'user_id' => auth()->id(),
+                'ip' => $request->ip(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid folder path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize folder path
+        $folderPath = $this->sanitizeFilePath($validated['folder_path']);
+
+        try {
+            $result = $this->storageService->deleteFolder($folderPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Folder deleted successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to delete folder.',
+                'error_type' => 'delete_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to delete folder', [
+                'folder_path' => $folderPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error deleting folder', [
+                'folder_path' => $folderPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while deleting the folder. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Rename a file in S3.
+     */
+    public function renameFile(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'file_path' => 'required|string|max:500',
+            'new_name' => 'required|string|max:255',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['file_path']) || 
+            $this->containsMaliciousPatterns($validated['new_name'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $filePath = $this->sanitizeFilePath($validated['file_path']);
+        $newName = $this->sanitizeFilePath($validated['new_name']);
+
+        // Validate new name doesn't contain path separators
+        if (str_contains($newName, '/')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'New name cannot contain path separators.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        try {
+            $result = $this->storageService->renameFile($filePath, $newName, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'File renamed successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to rename file.',
+                'error_type' => 'rename_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to rename file', [
+                'file_path' => $filePath,
+                'new_name' => $newName,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error renaming file', [
+                'file_path' => $filePath,
+                'new_name' => $newName,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while renaming the file. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Rename a folder in S3.
+     */
+    public function renameFolder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'folder_path' => 'required|string|max:500',
+            'new_name' => 'required|string|max:255',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['folder_path']) || 
+            $this->containsMaliciousPatterns($validated['new_name'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $folderPath = $this->sanitizeFilePath($validated['folder_path']);
+        $newName = $this->sanitizeFilePath($validated['new_name']);
+
+        // Validate new name doesn't contain path separators
+        if (str_contains($newName, '/')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'New name cannot contain path separators.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        try {
+            $result = $this->storageService->renameFolder($folderPath, $newName, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Folder renamed successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to rename folder.',
+                'error_type' => 'rename_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to rename folder', [
+                'folder_path' => $folderPath,
+                'new_name' => $newName,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error renaming folder', [
+                'folder_path' => $folderPath,
+                'new_name' => $newName,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while renaming the folder. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Move a file to a new location.
+     */
+    public function moveFile(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'source_path' => 'required|string|max:500',
+            'destination_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['source_path']) || 
+            $this->containsMaliciousPatterns($validated['destination_path'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $sourcePath = $this->sanitizeFilePath($validated['source_path']);
+        $destinationPath = $this->sanitizeFilePath($validated['destination_path']);
+
+        try {
+            $result = $this->storageService->moveFile($sourcePath, $destinationPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'File moved successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to move file.',
+                'error_type' => 'move_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to move file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error moving file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while moving the file. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Move a folder to a new location.
+     */
+    public function moveFolder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'source_path' => 'required|string|max:500',
+            'destination_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['source_path']) || 
+            $this->containsMaliciousPatterns($validated['destination_path'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $sourcePath = $this->sanitizeFilePath($validated['source_path']);
+        $destinationPath = $this->sanitizeFilePath($validated['destination_path']);
+
+        try {
+            $result = $this->storageService->moveFolder($sourcePath, $destinationPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Folder moved successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to move folder.',
+                'error_type' => 'move_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to move folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error moving folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while moving the folder. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Copy a file to a new location.
+     */
+    public function copyFile(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'source_path' => 'required|string|max:500',
+            'destination_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['source_path']) || 
+            $this->containsMaliciousPatterns($validated['destination_path'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $sourcePath = $this->sanitizeFilePath($validated['source_path']);
+        $destinationPath = $this->sanitizeFilePath($validated['destination_path']);
+
+        try {
+            $result = $this->storageService->copyFile($sourcePath, $destinationPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'File copied successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to copy file.',
+                'error_type' => 'copy_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to copy file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error copying file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while copying the file. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Copy a folder to a new location.
+     */
+    public function copyFolder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'source_path' => 'required|string|max:500',
+            'destination_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate paths for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['source_path']) || 
+            $this->containsMaliciousPatterns($validated['destination_path'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize paths
+        $sourcePath = $this->sanitizeFilePath($validated['source_path']);
+        $destinationPath = $this->sanitizeFilePath($validated['destination_path']);
+
+        try {
+            $result = $this->storageService->copyFolder($sourcePath, $destinationPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Folder copied successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to copy folder.',
+                'error_type' => 'copy_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to copy folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error copying folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while copying the folder. Please try again.',
+                'error_type' => 'unexpected',
+                'retryable' => true,
+            ], 500);
+        }
+    }
+
+    /**
+     * Create a new folder in S3.
+     */
+    public function createFolder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'folder_path' => 'required|string|max:500',
+            'disk' => 'required|string',
+        ]);
+
+        // Validate disk exists in config
+        if (! config("filesystems.disks.{$validated['disk']}")) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid storage disk specified.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Validate folder path for malicious patterns
+        if ($this->containsMaliciousPatterns($validated['folder_path'])) {
+            \Log::warning('Malicious folder path detected', [
+                'original_path' => $validated['folder_path'],
+                'user_id' => auth()->id(),
+                'ip' => $request->ip(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid folder path provided.',
+                'error_type' => 'validation',
+            ], 400);
+        }
+
+        // Sanitize folder path
+        $folderPath = $this->sanitizeFilePath($validated['folder_path']);
+
+        try {
+            $result = $this->storageService->createFolder($folderPath, $validated['disk']);
+
+            if ($result) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Folder created successfully',
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create folder.',
+                'error_type' => 'create_failed',
+            ], 500);
+        } catch (\RuntimeException $e) {
+            \Log::error('Failed to create folder', [
+                'folder_path' => $folderPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'error_type' => 's3_connection',
+                'retryable' => true,
+            ], 503);
+        } catch (\Exception $e) {
+            \Log::error('Unexpected error creating folder', [
+                'folder_path' => $folderPath,
+                'disk' => $validated['disk'],
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An unexpected error occurred while creating the folder. Please try again.',
                 'error_type' => 'unexpected',
                 'retryable' => true,
             ], 500);

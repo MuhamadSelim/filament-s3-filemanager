@@ -24,5 +24,50 @@ Route::middleware($middleware)
         Route::post('upload', [S3FileBrowserController::class, 'uploadFile'])
             ->middleware(['throttle:10,1'])
             ->name('upload');
+
+        // Delete file
+        Route::delete('file', [S3FileBrowserController::class, 'deleteFile'])
+            ->middleware(['throttle:60,1'])
+            ->name('delete-file');
+
+        // Delete folder
+        Route::delete('folder', [S3FileBrowserController::class, 'deleteFolder'])
+            ->middleware(['throttle:60,1'])
+            ->name('delete-folder');
+
+        // Rename file
+        Route::post('rename-file', [S3FileBrowserController::class, 'renameFile'])
+            ->middleware(['throttle:60,1'])
+            ->name('rename-file');
+
+        // Rename folder
+        Route::post('rename-folder', [S3FileBrowserController::class, 'renameFolder'])
+            ->middleware(['throttle:60,1'])
+            ->name('rename-folder');
+
+        // Move file
+        Route::post('move-file', [S3FileBrowserController::class, 'moveFile'])
+            ->middleware(['throttle:60,1'])
+            ->name('move-file');
+
+        // Move folder
+        Route::post('move-folder', [S3FileBrowserController::class, 'moveFolder'])
+            ->middleware(['throttle:60,1'])
+            ->name('move-folder');
+
+        // Copy file
+        Route::post('copy-file', [S3FileBrowserController::class, 'copyFile'])
+            ->middleware(['throttle:60,1'])
+            ->name('copy-file');
+
+        // Copy folder
+        Route::post('copy-folder', [S3FileBrowserController::class, 'copyFolder'])
+            ->middleware(['throttle:60,1'])
+            ->name('copy-folder');
+
+        // Create folder
+        Route::post('create-folder', [S3FileBrowserController::class, 'createFolder'])
+            ->middleware(['throttle:60,1'])
+            ->name('create-folder');
     });
 

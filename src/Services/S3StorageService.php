@@ -159,6 +159,557 @@ class S3StorageService
     }
 
     /**
+     * Delete folder and all its contents from S3.
+     *
+     * @throws \RuntimeException
+     */
+    public function deleteFolder(string $folderPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Sanitize folder path
+            $folderPath = rtrim($folderPath, '/');
+
+            // List all files in the folder (recursive)
+            $allFiles = $this->retryOperation(function () use ($storage, $folderPath) {
+                return $storage->allFiles($folderPath);
+            }, 2, 'list files for folder deletion');
+
+            // Delete all files
+            $deleted = true;
+            foreach ($allFiles as $filePath) {
+                if (!$storage->delete($filePath)) {
+                    $deleted = false;
+                }
+            }
+
+            // Clear cache after deletion
+            if ($deleted) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $deleted;
+        } catch (FilesystemException $e) {
+            Log::error('S3 connection error deleting folder', [
+                'operation' => 'delete_folder',
+                'folder_path' => $folderPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to delete folder. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Failed to delete S3 folder', [
+                'folder_path' => $folderPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * Rename a file in S3.
+     *
+     * @throws \RuntimeException
+     */
+    public function renameFile(string $oldPath, string $newName, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Get directory path
+            $directory = dirname($oldPath);
+            $newPath = $directory === '.' || $directory === '' 
+                ? $newName 
+                : rtrim($directory, '/').'/'.$newName;
+
+            // Check if new path already exists
+            if ($storage->exists($newPath)) {
+                throw new \RuntimeException('A file with this name already exists.');
+            }
+
+            // Move/rename the file
+            $result = $this->retryOperation(function () use ($storage, $oldPath, $newPath) {
+                return $storage->move($oldPath, $newPath);
+            }, 2, 'rename file');
+
+            // Clear cache after rename
+            if ($result) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $result;
+        } catch (FilesystemException | UnableToWriteFile $e) {
+            Log::error('S3 rename file error', [
+                'operation' => 'rename_file',
+                'old_path' => $oldPath,
+                'new_name' => $newName,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to rename file. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error renaming file', [
+                'old_path' => $oldPath,
+                'new_name' => $newName,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while renaming the file. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Rename a folder in S3.
+     *
+     * @throws \RuntimeException
+     */
+    public function renameFolder(string $oldPath, string $newName, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Sanitize paths
+            $oldPath = rtrim($oldPath, '/');
+            $parentPath = dirname($oldPath);
+            $newPath = ($parentPath === '.' || $parentPath === '') 
+                ? $newName 
+                : rtrim($parentPath, '/').'/'.$newName;
+
+            // Check if new path already exists
+            $existingDirs = $this->retryOperation(function () use ($storage, $parentPath) {
+                return $storage->directories($parentPath === '.' ? '' : $parentPath);
+            }, 2, 'check existing directories');
+
+            foreach ($existingDirs as $dir) {
+                if (basename($dir) === $newName) {
+                    throw new \RuntimeException('A folder with this name already exists.');
+                }
+            }
+
+            // Get all files in the old folder
+            $allFiles = $this->retryOperation(function () use ($storage, $oldPath) {
+                return $storage->allFiles($oldPath);
+            }, 2, 'list files for folder rename');
+
+            // Move all files to new path
+            $moved = true;
+            foreach ($allFiles as $filePath) {
+                $relativePath = str_replace($oldPath.'/', '', $filePath);
+                $newFilePath = $newPath.'/'.$relativePath;
+
+                if (!$storage->move($filePath, $newFilePath)) {
+                    $moved = false;
+                    break;
+                }
+            }
+
+            // Clear cache after rename
+            if ($moved) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $moved;
+        } catch (FilesystemException $e) {
+            Log::error('S3 connection error renaming folder', [
+                'operation' => 'rename_folder',
+                'old_path' => $oldPath,
+                'new_name' => $newName,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to rename folder. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error renaming folder', [
+                'old_path' => $oldPath,
+                'new_name' => $newName,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while renaming the folder. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Move a file to a new location.
+     *
+     * @throws \RuntimeException
+     */
+    public function moveFile(string $sourcePath, string $destinationPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Ensure destination path doesn't have trailing slash if it's a file
+            $destinationPath = rtrim($destinationPath, '/');
+
+            // Check if destination already exists
+            if ($storage->exists($destinationPath)) {
+                throw new \RuntimeException('A file with this name already exists at the destination.');
+            }
+
+            // Move the file
+            $result = $this->retryOperation(function () use ($storage, $sourcePath, $destinationPath) {
+                return $storage->move($sourcePath, $destinationPath);
+            }, 2, 'move file');
+
+            // Clear cache after move
+            if ($result) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $result;
+        } catch (FilesystemException | UnableToWriteFile $e) {
+            Log::error('S3 move file error', [
+                'operation' => 'move_file',
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to move file. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error moving file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while moving the file. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Move a folder to a new location.
+     *
+     * @throws \RuntimeException
+     */
+    public function moveFolder(string $sourcePath, string $destinationPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Sanitize paths
+            $sourcePath = rtrim($sourcePath, '/');
+            $destinationPath = rtrim($destinationPath, '/');
+
+            // Check if destination already exists
+            $parentPath = dirname($destinationPath);
+            $folderName = basename($destinationPath);
+            $existingDirs = $this->retryOperation(function () use ($storage, $parentPath) {
+                return $storage->directories($parentPath === '.' ? '' : $parentPath);
+            }, 2, 'check existing directories');
+
+            foreach ($existingDirs as $dir) {
+                if (basename($dir) === $folderName) {
+                    throw new \RuntimeException('A folder with this name already exists at the destination.');
+                }
+            }
+
+            // Get all files in the source folder
+            $allFiles = $this->retryOperation(function () use ($storage, $sourcePath) {
+                return $storage->allFiles($sourcePath);
+            }, 2, 'list files for folder move');
+
+            // Move all files to new path
+            $moved = true;
+            foreach ($allFiles as $filePath) {
+                $relativePath = str_replace($sourcePath.'/', '', $filePath);
+                $newFilePath = $destinationPath.'/'.$relativePath;
+
+                if (!$storage->move($filePath, $newFilePath)) {
+                    $moved = false;
+                    break;
+                }
+            }
+
+            // Clear cache after move
+            if ($moved) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $moved;
+        } catch (FilesystemException $e) {
+            Log::error('S3 connection error moving folder', [
+                'operation' => 'move_folder',
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to move folder. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error moving folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while moving the folder. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Copy a file to a new location.
+     *
+     * @throws \RuntimeException
+     */
+    public function copyFile(string $sourcePath, string $destinationPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Ensure destination path doesn't have trailing slash
+            $destinationPath = rtrim($destinationPath, '/');
+
+            // Check if destination already exists
+            if ($storage->exists($destinationPath)) {
+                throw new \RuntimeException('A file with this name already exists at the destination.');
+            }
+
+            // Copy the file
+            $result = $this->retryOperation(function () use ($storage, $sourcePath, $destinationPath) {
+                return $storage->copy($sourcePath, $destinationPath);
+            }, 2, 'copy file');
+
+            // Clear cache after copy
+            if ($result) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $result;
+        } catch (FilesystemException | UnableToWriteFile $e) {
+            Log::error('S3 copy file error', [
+                'operation' => 'copy_file',
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to copy file. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error copying file', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while copying the file. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Copy a folder and all its contents to a new location.
+     *
+     * @throws \RuntimeException
+     */
+    public function copyFolder(string $sourcePath, string $destinationPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Sanitize paths
+            $sourcePath = rtrim($sourcePath, '/');
+            $destinationPath = rtrim($destinationPath, '/');
+
+            // Check if destination already exists
+            $parentPath = dirname($destinationPath);
+            $folderName = basename($destinationPath);
+            $existingDirs = $this->retryOperation(function () use ($storage, $parentPath) {
+                return $storage->directories($parentPath === '.' ? '' : $parentPath);
+            }, 2, 'check existing directories');
+
+            foreach ($existingDirs as $dir) {
+                if (basename($dir) === $folderName) {
+                    throw new \RuntimeException('A folder with this name already exists at the destination.');
+                }
+            }
+
+            // Get all files in the source folder
+            $allFiles = $this->retryOperation(function () use ($storage, $sourcePath) {
+                return $storage->allFiles($sourcePath);
+            }, 2, 'list files for folder copy');
+
+            // Copy all files to new path
+            $copied = true;
+            foreach ($allFiles as $filePath) {
+                $relativePath = str_replace($sourcePath.'/', '', $filePath);
+                $newFilePath = $destinationPath.'/'.$relativePath;
+
+                if (!$storage->copy($filePath, $newFilePath)) {
+                    $copied = false;
+                    break;
+                }
+            }
+
+            // Clear cache after copy
+            if ($copied) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $copied;
+        } catch (FilesystemException $e) {
+            Log::error('S3 connection error copying folder', [
+                'operation' => 'copy_folder',
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to copy folder. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error copying folder', [
+                'source_path' => $sourcePath,
+                'destination_path' => $destinationPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while copying the folder. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
+     * Create a new folder in S3.
+     *
+     * @throws \RuntimeException
+     */
+    public function createFolder(string $folderPath, string $disk): bool
+    {
+        try {
+            $storage = Storage::disk($disk);
+
+            // Sanitize folder path
+            $folderPath = rtrim($folderPath, '/');
+
+            // Check if folder already exists
+            $parentPath = dirname($folderPath);
+            $folderName = basename($folderPath);
+
+            if ($parentPath === '.' || $parentPath === '') {
+                $parentPath = '';
+            } else {
+                $parentPath = rtrim($parentPath, '/');
+            }
+
+            $existingDirs = $this->retryOperation(function () use ($storage, $parentPath) {
+                return $storage->directories($parentPath);
+            }, 2, 'check existing directories');
+
+            foreach ($existingDirs as $dir) {
+                if (basename($dir) === $folderName) {
+                    throw new \RuntimeException('A folder with this name already exists.');
+                }
+            }
+
+            // Create folder by creating a placeholder file (S3 doesn't have true folders)
+            // We'll create an empty file with a special marker
+            $placeholderPath = $folderPath.'/.folder';
+            $result = $this->retryOperation(function () use ($storage, $placeholderPath) {
+                return $storage->put($placeholderPath, '');
+            }, 2, 'create folder');
+
+            // Clear cache after creation
+            if ($result) {
+                $this->clearFileListCache($disk);
+            }
+
+            return $result;
+        } catch (FilesystemException | UnableToWriteFile $e) {
+            Log::error('S3 create folder error', [
+                'operation' => 'create_folder',
+                'folder_path' => $folderPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'Unable to create folder. Please check your connection and try again.',
+                0,
+                $e
+            );
+        } catch (\Exception $e) {
+            Log::error('Unexpected error creating folder', [
+                'folder_path' => $folderPath,
+                'disk' => $disk,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new \RuntimeException(
+                'An unexpected error occurred while creating the folder. Please try again.',
+                0,
+                $e
+            );
+        }
+    }
+
+    /**
      * Get file metadata.
      */
     public function getFileMetadata(string $s3Key, string $disk): array
@@ -287,12 +838,13 @@ class S3StorageService
     }
 
     /**
-     * List files in a specific folder (non-recursive) with pagination.
+     * List files and directories in a specific folder (non-recursive) with pagination.
      *
      * @param  string  $folderPath  Folder path
+     * @param  string  $disk  Disk name
      * @param  int  $page  Page number (1-indexed)
      * @param  int  $perPage  Items per page
-     * @return array ['files' => [...], 'pagination' => [...]]
+     * @return array ['files' => [...], 'directories' => [...], 'pagination' => [...]]
      */
     public function listFilesInFolder(
         string $folderPath,
@@ -303,22 +855,52 @@ class S3StorageService
         try {
             $storage = Storage::disk($disk);
 
-            // Retry listing files up to 2 times for transient errors
+            // Retry listing files and directories up to 2 times for transient errors
             $allFiles = $this->retryOperation(function () use ($storage, $folderPath) {
                 return $storage->files($folderPath);
             }, 2, 'list files in folder');
 
-            $total = count($allFiles);
-            $offset = ($page - 1) * $perPage;
-            $files = array_slice($allFiles, $offset, $perPage);
+            $allDirectories = $this->retryOperation(function () use ($storage, $folderPath) {
+                return $storage->directories($folderPath);
+            }, 2, 'list directories in folder');
 
-            $result = [];
-            foreach ($files as $filePath) {
-                $result[] = $this->formatFileInfo($filePath, $storage);
+            // Format directories
+            $formattedDirectories = [];
+            foreach ($allDirectories as $dirPath) {
+                $formattedDirectories[] = [
+                    'path' => $dirPath,
+                    'name' => basename($dirPath),
+                    'type' => 'directory',
+                ];
+            }
+
+            // Format files
+            $formattedFiles = [];
+            foreach ($allFiles as $filePath) {
+                $formattedFiles[] = $this->formatFileInfo($filePath, $storage);
+            }
+
+            // Calculate pagination for combined items (directories first, then files)
+            $allItems = array_merge($formattedDirectories, $formattedFiles);
+            $total = count($allItems);
+            $offset = ($page - 1) * $perPage;
+            $paginatedItems = array_slice($allItems, $offset, $perPage);
+
+            // Separate paginated items back into directories and files
+            $resultDirectories = [];
+            $resultFiles = [];
+
+            foreach ($paginatedItems as $item) {
+                if (is_array($item) && isset($item['type']) && $item['type'] === 'directory') {
+                    $resultDirectories[] = $item;
+                } else {
+                    $resultFiles[] = $item;
+                }
             }
 
             return [
-                'files' => $result,
+                'files' => $resultFiles,
+                'directories' => $resultDirectories,
                 'pagination' => [
                     'current_page' => $page,
                     'per_page' => $perPage,
@@ -337,6 +919,7 @@ class S3StorageService
 
             return [
                 'files' => [],
+                'directories' => [],
                 'pagination' => [
                     'current_page' => 1,
                     'per_page' => $perPage,
@@ -355,6 +938,7 @@ class S3StorageService
 
             return [
                 'files' => [],
+                'directories' => [],
                 'pagination' => [
                     'current_page' => 1,
                     'per_page' => $perPage,
