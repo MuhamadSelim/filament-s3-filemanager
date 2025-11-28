@@ -24,6 +24,9 @@ class S3StorageService
         string $disk,
         ?string $folderPath = null
     ): array {
+        // Validate disk configuration first
+        $this->validateDiskConfiguration($disk);
+
         $filename = $this->generateUniqueFilename($file);
         $s3Key = $folderPath ? rtrim($folderPath, '/').'/'.$filename : $filename;
 
@@ -51,12 +54,28 @@ class S3StorageService
                 'file_mime_type' => $file->getMimeType(),
             ];
         } catch (FilesystemException | UnableToWriteFile $e) {
+            $errorMessage = $e->getMessage();
+            $isConfigError = str_contains($errorMessage, 'Could not resolve host') ||
+                            str_contains($errorMessage, 'Malformed URL') ||
+                            str_contains($errorMessage, 'Invalid URL');
+
             Log::error('S3 upload error', [
                 'operation' => 'upload',
                 's3_key' => $s3Key,
                 'disk' => $disk,
-                'error' => $e->getMessage(),
+                'error' => $errorMessage,
+                'is_config_error' => $isConfigError,
             ]);
+
+            if ($isConfigError) {
+                throw new \RuntimeException(
+                    "Storage configuration error for disk '{$disk}'. ".
+                    "Please check your endpoint configuration in filesystems.php. ".
+                    "Error: ".$errorMessage,
+                    0,
+                    $e
+                );
+            }
 
             throw new \RuntimeException(
                 'Unable to upload file to storage. Please check your connection and try again.',
@@ -766,6 +785,9 @@ class S3StorageService
      */
     public function listFilesWithFolders(string $disk): array
     {
+        // Validate disk configuration first
+        $this->validateDiskConfiguration($disk);
+
         $cacheKey = 's3_files_'.$disk.'_'.md5($disk);
 
         return Cache::remember($cacheKey, now()->addMinutes(5), function () use ($disk) {
@@ -779,11 +801,27 @@ class S3StorageService
 
                 return $this->buildFolderStructure($allFiles, $storage);
             } catch (FilesystemException $e) {
+                $errorMessage = $e->getMessage();
+                $isConfigError = str_contains($errorMessage, 'Could not resolve host') ||
+                                str_contains($errorMessage, 'Malformed URL');
+
                 Log::error('S3 connection error listing files with folders', [
                     'operation' => 'list_files_with_folders',
                     'disk' => $disk,
-                    'error' => $e->getMessage(),
+                    'error' => $errorMessage,
+                    'is_config_error' => $isConfigError,
                 ]);
+
+                // Don't cache configuration errors
+                if ($isConfigError) {
+                    Cache::forget($cacheKey);
+                    throw new \RuntimeException(
+                        "Storage configuration error for disk '{$disk}'. ".
+                        "Please check your endpoint configuration. Error: ".$errorMessage,
+                        0,
+                        $e
+                    );
+                }
 
                 return ['folders' => [], 'files' => []];
             } catch (\Exception $e) {
@@ -805,6 +843,9 @@ class S3StorageService
      */
     public function getFolderTree(string $disk): array
     {
+        // Validate disk configuration first
+        $this->validateDiskConfiguration($disk);
+
         $cacheKey = 's3_tree_'.$disk.'_'.md5($disk);
 
         return Cache::remember($cacheKey, now()->addMinutes(5), function () use ($disk) {
@@ -818,11 +859,27 @@ class S3StorageService
 
                 return $this->buildFolderTree($allFiles);
             } catch (FilesystemException $e) {
+                $errorMessage = $e->getMessage();
+                $isConfigError = str_contains($errorMessage, 'Could not resolve host') ||
+                                str_contains($errorMessage, 'Malformed URL');
+
                 Log::error('S3 connection error building folder tree', [
                     'operation' => 'get_folder_tree',
                     'disk' => $disk,
-                    'error' => $e->getMessage(),
+                    'error' => $errorMessage,
+                    'is_config_error' => $isConfigError,
                 ]);
+
+                // Don't cache configuration errors
+                if ($isConfigError) {
+                    Cache::forget($cacheKey);
+                    throw new \RuntimeException(
+                        "Storage configuration error for disk '{$disk}'. ".
+                        "Please check your endpoint configuration. Error: ".$errorMessage,
+                        0,
+                        $e
+                    );
+                }
 
                 return [];
             } catch (\Exception $e) {
@@ -852,6 +909,9 @@ class S3StorageService
         int $page = 1,
         int $perPage = 50
     ): array {
+        // Validate disk configuration first
+        $this->validateDiskConfiguration($disk);
+
         try {
             $storage = Storage::disk($disk);
 
@@ -909,46 +969,61 @@ class S3StorageService
                     'has_more' => $page < ceil($total / $perPage),
                 ],
             ];
-        } catch (FilesystemException $e) {
-            Log::error('S3 connection error listing files in folder', [
-                'operation' => 'list_files_in_folder',
-                'folder' => $folderPath,
-                'disk' => $disk,
-                'error' => $e->getMessage(),
-            ]);
+            } catch (FilesystemException $e) {
+                $errorMessage = $e->getMessage();
+                $isConfigError = str_contains($errorMessage, 'Could not resolve host') ||
+                                str_contains($errorMessage, 'Malformed URL');
 
-            return [
-                'files' => [],
-                'directories' => [],
-                'pagination' => [
-                    'current_page' => 1,
-                    'per_page' => $perPage,
-                    'total' => 0,
-                    'last_page' => 0,
-                    'has_more' => false,
-                ],
-            ];
-        } catch (\Exception $e) {
-            Log::error('Unexpected error listing files in folder', [
-                'operation' => 'list_files_in_folder',
-                'folder' => $folderPath,
-                'disk' => $disk,
-                'error' => $e->getMessage(),
-            ]);
+                Log::error('S3 connection error listing files in folder', [
+                    'operation' => 'list_files_in_folder',
+                    'folder' => $folderPath,
+                    'disk' => $disk,
+                    'error' => $errorMessage,
+                    'is_config_error' => $isConfigError,
+                ]);
 
-            return [
-                'files' => [],
-                'directories' => [],
-                'pagination' => [
-                    'current_page' => 1,
-                    'per_page' => $perPage,
-                    'total' => 0,
-                    'last_page' => 0,
-                    'has_more' => false,
-                ],
-            ];
+                // Throw configuration errors instead of returning empty
+                if ($isConfigError) {
+                    throw new \RuntimeException(
+                        "Storage configuration error for disk '{$disk}'. ".
+                        "Please check your endpoint configuration. Error: ".$errorMessage,
+                        0,
+                        $e
+                    );
+                }
+
+                return [
+                    'files' => [],
+                    'directories' => [],
+                    'pagination' => [
+                        'current_page' => 1,
+                        'per_page' => $perPage,
+                        'total' => 0,
+                        'last_page' => 0,
+                        'has_more' => false,
+                    ],
+                ];
+            } catch (\Exception $e) {
+                Log::error('Unexpected error listing files in folder', [
+                    'operation' => 'list_files_in_folder',
+                    'folder' => $folderPath,
+                    'disk' => $disk,
+                    'error' => $e->getMessage(),
+                ]);
+
+                return [
+                    'files' => [],
+                    'directories' => [],
+                    'pagination' => [
+                        'current_page' => 1,
+                        'per_page' => $perPage,
+                        'total' => 0,
+                        'last_page' => 0,
+                        'has_more' => false,
+                    ],
+                ];
+            }
         }
-    }
 
     /**
      * List directories in a specific folder.
@@ -1213,9 +1288,130 @@ class S3StorageService
      */
     protected function isRetryableError(FilesystemException $exception): bool
     {
-        // Most FilesystemException errors are transient and retryable
-        // You can add more specific checks here if needed
+        $errorMessage = $exception->getMessage();
+
+        // DNS resolution errors are not retryable - configuration issue
+        if (str_contains($errorMessage, 'Could not resolve host') ||
+            str_contains($errorMessage, 'Name or service not known') ||
+            str_contains($errorMessage, 'getaddrinfo failed')) {
+            return false;
+        }
+
+        // Malformed URL errors are not retryable - configuration issue
+        if (str_contains($errorMessage, 'Malformed URL') ||
+            str_contains($errorMessage, 'Invalid URL')) {
+            return false;
+        }
+
+        // Connection refused/timeout errors might be retryable (network issues)
+        if (str_contains($errorMessage, 'Connection refused') ||
+            str_contains($errorMessage, 'Connection timed out') ||
+            str_contains($errorMessage, 'Operation timed out')) {
+            return true;
+        }
+
+        // HTTP 5xx errors are retryable (server errors)
+        if (preg_match('/HTTP error: (\d{3})/', $errorMessage, $matches)) {
+            $statusCode = (int) $matches[1];
+            if ($statusCode >= 500 && $statusCode < 600) {
+                return true;
+            }
+        }
+
+        // cURL errors that are retryable
+        if (preg_match('/cURL error (\d+):/', $errorMessage, $matches)) {
+            $curlError = (int) $matches[1];
+            // cURL error 6 = Could not resolve host (not retryable)
+            // cURL error 7 = Failed to connect (might be retryable)
+            // cURL error 28 = Timeout (retryable)
+            return in_array($curlError, [7, 28, 35, 52, 55], true);
+        }
+
+        // Default: retry for transient errors
         return true;
+    }
+
+    /**
+     * Validate disk configuration before operations.
+     *
+     * @throws \RuntimeException
+     */
+    protected function validateDiskConfiguration(string $disk): void
+    {
+        $config = config("filesystems.disks.{$disk}");
+
+        if (! $config) {
+            throw new \RuntimeException(
+                "Storage disk '{$disk}' is not configured. Please check your filesystems.php configuration."
+            );
+        }
+
+        // Check for S3-compatible storage
+        if ($config['driver'] !== 's3') {
+            throw new \RuntimeException(
+                "Storage disk '{$disk}' must use the 's3' driver for S3-compatible storage."
+            );
+        }
+
+        // Validate endpoint if provided
+        if (isset($config['endpoint']) && ! empty($config['endpoint'])) {
+            $endpoint = $config['endpoint'];
+
+            // Check for malformed endpoint URLs
+            if (filter_var($endpoint, FILTER_VALIDATE_URL) === false) {
+                throw new \RuntimeException(
+                    "Invalid endpoint URL for disk '{$disk}': '{$endpoint}'. ".
+                    "Please check your AWS_ENDPOINT or DIGITALOCEAN_SPACES_ENDPOINT environment variable."
+                );
+            }
+
+            // Check if endpoint is DigitalOcean Spaces format
+            $isDigitalOcean = str_contains($endpoint, 'digitaloceanspaces.com');
+
+            // For DigitalOcean Spaces, use_path_style_endpoint MUST be true
+            // Otherwise, the S3 client will try to construct virtual-hosted URLs incorrectly
+            // This causes URLs like: https://s3.fra1.amazonaws.com/fra1.digitaloceanspaces.com/ (WRONG)
+            // Instead of: https://fra1.digitaloceanspaces.com/bucket-name/ (CORRECT)
+            $usePathStyle = $config['use_path_style_endpoint'] ?? false;
+
+            if ($isDigitalOcean && ! $usePathStyle) {
+                throw new \RuntimeException(
+                    "Storage disk '{$disk}' is configured for DigitalOcean Spaces but 'use_path_style_endpoint' is not set to true. ".
+                    "This causes the S3 client to incorrectly construct URLs. ".
+                    "Please add 'use_path_style_endpoint' => true to your disk configuration in config/filesystems.php. ".
+                    "Example:\n".
+                    "'{$disk}' => [\n".
+                    "    'driver' => 's3',\n".
+                    "    'endpoint' => env('DIGITALOCEAN_SPACES_ENDPOINT'),\n".
+                    "    'use_path_style_endpoint' => true, // Required for DigitalOcean Spaces\n".
+                    "    // ... other config\n".
+                    "],"
+                );
+            }
+
+            // Warn about common endpoint misconfigurations
+            if (str_contains($endpoint, 's3.') && str_contains($endpoint, 'digitaloceanspaces.com')) {
+                Log::warning('Potential endpoint misconfiguration detected', [
+                    'disk' => $disk,
+                    'endpoint' => $endpoint,
+                    'message' => 'Endpoint appears to mix AWS S3 and DigitalOcean Spaces formats. '.
+                                 'For DigitalOcean Spaces, use: https://{region}.digitaloceanspaces.com',
+                ]);
+            }
+
+            // Validate endpoint format for DigitalOcean Spaces
+            if ($isDigitalOcean) {
+                // DigitalOcean Spaces endpoint should be: https://{region}.digitaloceanspaces.com
+                if (! preg_match('/^https:\/\/([a-z0-9-]+)\.digitaloceanspaces\.com\/?$/', $endpoint)) {
+                    Log::warning('DigitalOcean Spaces endpoint format may be incorrect', [
+                        'disk' => $disk,
+                        'endpoint' => $endpoint,
+                        'expected_format' => 'https://{region}.digitaloceanspaces.com',
+                        'example' => 'https://fra1.digitaloceanspaces.com',
+                    ]);
+                }
+            }
+        }
     }
 }
 
