@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2025-11-29
+
 ### Added
+- Initial release
+- File and folder selection support
+- Folder navigation with breadcrumbs
+- File search functionality
+- File preview (images, videos, PDFs, audio)
+- File upload with progress tracking
+- Grid and list view modes
+- Presigned URLs for secure file access
+- Caching for improved performance
+- Flysystem integration for S3-compatible storage
 - Delete file and folder functionality
 - Rename file and folder operations
 - Move file and folder operations
@@ -29,18 +41,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated folder contents response to include directories array
 - Enhanced file browser UI with directory support
 - Improved error messages and user feedback
-
-## [1.0.0] - 2024-01-01
-
-### Added
-- Initial release
-- File and folder selection support
-- Folder navigation with breadcrumbs
-- File search functionality
-- File preview (images, videos, PDFs, audio)
-- File upload with progress tracking
-- Grid and list view modes
-- Presigned URLs for secure file access
-- Caching for improved performance
-- Flysystem integration for S3-compatible storage
 
