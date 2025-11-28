@@ -1,6 +1,6 @@
 {
     "name": "muhamad-selim/filament-s3-filemanager",
-    "description": "A Filament v3 plugin for S3 file management with file and folder selection support",
+    "description": "A Filament v4 plugin for S3 file management with file and folder selection support",
     "type": "library",
     "license": "MIT",
     "authors": [
@@ -11,8 +11,8 @@
     ],
     "require": {
         "php": "^8.3",
-        "filament/filament": "^3.2",
-        "laravel/framework": "^11.0",
+        "filament/filament": "^4.0",
+        "laravel/framework": "^11.28",
         "league/flysystem": "^3.0",
         "league/flysystem-aws-s3-v3": "^3.0"
     },

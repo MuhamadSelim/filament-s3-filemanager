@@ -1,6 +1,8 @@
 # Filament S3 File Manager
 
-A Filament v3 plugin for S3-compatible file management with file and folder selection support, built with Flysystem integration.
+A Filament v4 plugin for S3-compatible file management with file and folder selection support, built with Flysystem integration.
+
+> **Note:** This branch (`filament-v4-compatibility`) is for FilamentPHP v4. For FilamentPHP v3 support, please use the `main` branch.
 
 ## Features
 
@@ -282,11 +284,16 @@ The test suite covers:
 
 ## Requirements
 
-- PHP 8.3+
-- Laravel 11.0+
-- Filament 3.2+
+- PHP 8.2+
+- Laravel 11.28+
+- Filament 4.0+
 - League Flysystem 3.0+
 - League Flysystem AWS S3 V3 3.0+
+
+## Version Compatibility
+
+- **FilamentPHP v4**: Use this branch (`filament-v4-compatibility`)
+- **FilamentPHP v3**: Use the `main` branch
 
 ## License
 
