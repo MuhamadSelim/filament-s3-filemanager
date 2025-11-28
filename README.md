@@ -248,17 +248,37 @@ The file browser includes comprehensive file management capabilities:
 
 ## Testing
 
-Run the test suite:
+The package includes a comprehensive test suite using Pest. To run the tests:
 
 ```bash
-composer test
+# From the package directory
+cd packages/muhamad-selim/filament-s3-filemanager
+composer install
+vendor/bin/pest
+
+# Or from the main project root
+php artisan test packages/muhamad-selim/filament-s3-filemanager/tests
 ```
 
-Or with PHPUnit directly:
+### Test Structure
 
-```bash
-vendor/bin/phpunit
-```
+- **Unit Tests**: Service provider registration and configuration
+- **Feature Tests**: 
+  - S3StorageService: File operations, caching, error handling
+  - S3FileBrowserController: API endpoints, authentication, validation
+  - S3FileManager Component: Form component functionality
+  - Integration: End-to-end workflows
+
+### Test Coverage
+
+The test suite covers:
+- File upload, deletion, and metadata operations
+- Presigned URL generation
+- Folder structure listing and navigation
+- File/folder selection modes
+- Security (path sanitization, authentication)
+- Error handling and retry logic
+- Cache management
 
 ## Requirements
 

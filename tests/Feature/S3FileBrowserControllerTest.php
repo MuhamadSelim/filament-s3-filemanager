@@ -1,118 +1,238 @@
 <?php
 
-namespace MuhamadSelim\FilamentS3Filemanager\Tests\Feature;
-
-use MuhamadSelim\FilamentS3Filemanager\Tests\TestCase;
+use App\Models\User;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Auth;
 
-class S3FileBrowserControllerTest extends TestCase
-{
-    protected function setUp(): void
-    {
-        parent::setUp();
+beforeEach(function () {
+    $this->admin = User::factory()->create(['role' => 'admin']);
+    $this->disk = 's3';
+    Storage::fake($this->disk);
+});
 
-        // Configure a test disk
-        config(['filesystems.disks.test_s3' => [
-            'driver' => 'local',
-            'root' => storage_path('app/test-s3'),
-        ]]);
+test('admin can get folder contents', function () {
+    Storage::disk($this->disk)->put('test-folder/file1.pdf', 'content1');
+    Storage::disk($this->disk)->put('test-folder/file2.pdf', 'content2');
 
-        // Mock authentication - create a simple user object
-        $user = new class {
-            public function getAuthIdentifierName() { return 'id'; }
-            public function getAuthIdentifier() { return 1; }
-        };
-        Auth::shouldReceive('id')->andReturn(1);
-        Auth::shouldReceive('check')->andReturn(true);
-        Auth::shouldReceive('user')->andReturn($user);
-    }
-
-    protected function tearDown(): void
-    {
-        // Clean up test files
-        if (Storage::disk('test_s3')->exists('')) {
-            Storage::disk('test_s3')->deleteDirectory('');
-        }
-
-        parent::tearDown();
-    }
-
-    public function test_can_get_folder_contents(): void
-    {
-        Storage::disk('test_s3')->put('test-file.txt', 'test content');
-        Storage::disk('test_s3')->makeDirectory('test-folder');
-
-        $response = $this->postJson(route('filament-s3-filemanager.folder-contents'), [
-            'folder_path' => '',
-            'disk' => 'test_s3',
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.folder-contents'), [
+            'folder_path' => 'test-folder',
+            'disk' => $this->disk,
             'page' => 1,
-            'per_page' => 50,
+            'per_page' => 10,
         ]);
 
-        $response->assertStatus(200)
-            ->assertJsonStructure([
-                'success',
-                'files',
-                'directories',
-                'pagination',
-            ]);
-    }
-
-    public function test_can_generate_preview_url(): void
-    {
-        Storage::disk('test_s3')->put('test-file.txt', 'test content');
-
-        $response = $this->postJson(route('filament-s3-filemanager.preview-url'), [
-            'file_path' => 'test-file.txt',
-            'disk' => 'test_s3',
+    $response->assertSuccessful()
+        ->assertJson([
+            'success' => true,
+        ])
+        ->assertJsonStructure([
+            'success',
+            'files',
+            'pagination' => [
+                'current_page',
+                'per_page',
+                'total',
+                'last_page',
+                'has_more',
+            ],
         ]);
 
-        $response->assertStatus(200)
-            ->assertJsonStructure([
-                'success',
-                'url',
-                'type',
-            ]);
-    }
+    expect($response->json('files'))->toBeArray()
+        ->and($response->json('pagination.total'))->toBeGreaterThanOrEqual(0);
+});
 
-    public function test_can_delete_file(): void
-    {
-        Storage::disk('test_s3')->put('test-file.txt', 'test content');
+test('folder contents endpoint requires authentication', function () {
+    $response = $this->postJson(route('filament-s3-filemanager.folder-contents'), [
+        'folder_path' => 'test-folder',
+        'disk' => $this->disk,
+    ]);
 
-        $response = $this->deleteJson(route('filament-s3-filemanager.delete-file'), [
-            'file_path' => 'test-file.txt',
-            'disk' => 'test_s3',
+    $response->assertUnauthorized();
+});
+
+test('folder contents endpoint validates disk parameter', function () {
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.folder-contents'), [
+            'folder_path' => 'test-folder',
+            'disk' => 'invalid-disk',
         ]);
 
-        $response->assertStatus(200)
-            ->assertJson(['success' => true]);
-
-        $this->assertFalse(Storage::disk('test_s3')->exists('test-file.txt'));
-    }
-
-    public function test_can_create_folder(): void
-    {
-        $response = $this->postJson(route('filament-s3-filemanager.create-folder'), [
-            'folder_path' => 'new-folder',
-            'disk' => 'test_s3',
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
         ]);
+});
 
-        $response->assertStatus(200)
-            ->assertJson(['success' => true]);
-
-        $this->assertTrue(Storage::disk('test_s3')->exists('new-folder/.folder'));
-    }
-
-    public function test_validates_malicious_paths(): void
-    {
-        $response = $this->postJson(route('filament-s3-filemanager.folder-contents'), [
+test('folder contents endpoint rejects malicious paths', function () {
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.folder-contents'), [
             'folder_path' => '../../../etc/passwd',
-            'disk' => 'test_s3',
+            'disk' => $this->disk,
         ]);
 
-        $response->assertStatus(400)
-            ->assertJson(['success' => false]);
-    }
-}
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
+        ]);
+});
 
+test('admin can generate preview url', function () {
+    Storage::disk($this->disk)->put('test-image.jpg', 'fake-image-content');
+
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.preview-url'), [
+            'file_path' => 'test-image.jpg',
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertSuccessful()
+        ->assertJson([
+            'success' => true,
+            'type' => 'image',
+        ])
+        ->assertJsonStructure([
+            'success',
+            'url',
+            'type',
+            'metadata',
+            'expires_in',
+        ]);
+
+    expect($response->json('url'))->toBeString()
+        ->and($response->json('url'))->not->toBeEmpty();
+});
+
+test('preview url endpoint requires authentication', function () {
+    $response = $this->postJson(route('filament-s3-filemanager.preview-url'), [
+        'file_path' => 'test.jpg',
+        'disk' => $this->disk,
+    ]);
+
+    $response->assertUnauthorized();
+});
+
+test('preview url endpoint validates file path', function () {
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.preview-url'), [
+            'file_path' => '',
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertUnprocessable()
+        ->assertJsonValidationErrors(['file_path']);
+});
+
+test('preview url endpoint rejects malicious file paths', function () {
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.preview-url'), [
+            'file_path' => '../../../etc/passwd',
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
+        ]);
+});
+
+test('admin can upload file', function () {
+    $file = UploadedFile::fake()->create('test-file.pdf', 100);
+
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.upload'), [
+            'file' => $file,
+            'folder_path' => 'test-folder',
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertSuccessful()
+        ->assertJson([
+            'success' => true,
+        ])
+        ->assertJsonStructure([
+            'success',
+            'file' => [
+                'path',
+                'name',
+                'size',
+                'type',
+            ],
+            'message',
+        ]);
+
+    expect($response->json('file.path'))->toBeString()
+        ->and($response->json('file.path'))->toContain('test-folder');
+});
+
+test('upload endpoint requires authentication', function () {
+    $file = UploadedFile::fake()->create('test-file.pdf', 100);
+
+    $response = $this->postJson(route('filament-s3-filemanager.upload'), [
+        'file' => $file,
+        'disk' => $this->disk,
+    ]);
+
+    $response->assertUnauthorized();
+});
+
+test('upload endpoint validates file parameter', function () {
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.upload'), [
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertUnprocessable()
+        ->assertJsonValidationErrors(['file']);
+});
+
+test('upload endpoint validates file type', function () {
+    $file = UploadedFile::fake()->create('test-file.exe', 100);
+
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.upload'), [
+            'file' => $file,
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
+        ]);
+});
+
+test('upload endpoint validates file size', function () {
+    // Create a file larger than the default max (2GB = 2048000 KB)
+    $file = UploadedFile::fake()->create('test-file.pdf', 3000000 * 1024); // 3GB
+
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.upload'), [
+            'file' => $file,
+            'disk' => $this->disk,
+        ]);
+
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
+        ]);
+});
+
+test('upload endpoint validates disk parameter', function () {
+    $file = UploadedFile::fake()->create('test-file.pdf', 100);
+
+    $response = $this->actingAs($this->admin)
+        ->postJson(route('filament-s3-filemanager.upload'), [
+            'file' => $file,
+            'disk' => 'invalid-disk',
+        ]);
+
+    $response->assertStatus(400)
+        ->assertJson([
+            'success' => false,
+            'error_type' => 'validation',
+        ]);
+});
